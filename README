@@ -1,0 +1,75 @@
+Process Scheduling Project
+
+Overview
+
+This project simulates the process scheduling part of an operating system. The oss program acts as the main operating system scheduler, creating and managing child processes (user), scheduling them based on a priority algorithm, and using message queues for inter-process communication. The scheduler keeps track of shared resources and the state of each process, including their waiting times, execution states, and overall priorities.
+
+Features
+
+Shared Memory: A shared clock is used to synchronize processes.
+
+Message Queues: Message queues are used for communication between oss and user processes.
+
+Process Management: The scheduler can create up to 18 processes and manage their states (blocked, running, or terminated).
+
+Priority Scheduling: Processes are scheduled based on priority calculations derived from system time and service time. (Not working)
+
+Logging: Key events are logged to a specified file. (Not working)
+
+File Descriptions
+
+oss.c: The main scheduler program responsible for creating and managing child processes.
+
+user.c: Represents the child processes that communicate with the scheduler to perform tasks.
+
+pcb.h: Header file that defines the Process Control Block (PCB) structure used to keep track of each process.
+
+Makefile: Script to compile both oss and user programs.
+
+Compilation
+
+To compile the project, use the provided Makefile. Simply run:
+
+make
+
+This will create two executable files: oss and user.
+
+Running the Project
+
+To run the scheduler (oss), use:
+
+./oss [-h] [-n proc] [-s simul] [-t timeToLaunchNewChild] [-f logfile]
+
+Command Line Options:
+
+-h : Displays the help message with usage instructions.
+
+-n : Specifies the total number of processes to launch (default is 18).
+
+-s : Sets the maximum number of simultaneous processes (default is 5).
+
+-t : Specifies the time interval (in nanoseconds) to launch a new child process.
+
+-f : Sets the log file name to record events (default is log.txt).
+
+Cleaning Up
+
+To remove compiled binaries and clean the directory, run:
+
+make clean
+
+This will remove the oss and user executables as well as any object files.
+
+Notes
+
+Shared Memory and Message Queue Cleanup: The shared memory and message queue are cleaned up when oss receives a termination signal (e.g., SIGINT). Ensure proper termination to avoid leaving shared resources in memory.
+
+Signal Handling: The scheduler has a timeout mechanism of 60 seconds, after which it automatically cleans up resources.
+
+Logging: Key actions, such as process launches and message exchanges, are logged to the specified log file for easier debugging and analysis.
+
+Example Usage
+
+To launch the scheduler with a maximum of 10 processes, 3 simultaneous processes, and a log file named my_log.txt:
+
+./oss -n 10 -s 3 -f my_log.txt
