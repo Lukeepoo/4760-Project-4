@@ -73,3 +73,7 @@ Example Usage
 To launch the scheduler with a maximum of 10 processes, 3 simultaneous processes, and a log file named my_log.txt:
 
 ./oss -n 10 -s 3 -f my_log.txt
+
+Github:
+
+https://github.com/Lukeepoo/4760-Project-4
