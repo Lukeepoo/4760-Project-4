@@ -89,3 +89,8 @@ Files Included
 - utility.h / utility.c — helpers for time and output
 - message.h — message queue format
 - Makefile — with suffix rules
+--------------------------------------------------------------
+
+Version Control
+
+Github: https://github.com/Lukeepoo/4760-Project-4
