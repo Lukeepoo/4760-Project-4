@@ -1,10 +1,10 @@
 all: oss user
 
-oss: oss.c pcb.h
-	gcc -o oss oss.c -lrt
+oss: oss.o queue.o utility.o
+	gcc -o oss oss.o queue.o utility.o -lrt
 
-user: user.c pcb.h
-	gcc -o user user.c -lrt
+user: user.o utility.o
+	gcc -o user user.o utility.o -lrt
 
 clean:
-	rm -f oss user *.o
+	rm -f *.o oss user log.txt

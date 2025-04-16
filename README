@@ -1,79 +1,91 @@
-Process Scheduling Project
+CS 4760 Assignment 4 – Process Scheduling Simulator
+Author: Lucas Lovellette
 
-Overview
+------------------------------------------------------------
 
-This project simulates the process scheduling part of an operating system. The oss program acts as the main operating system scheduler, creating and managing child processes (user), scheduling them based on a priority algorithm, and using message queues for inter-process communication. The scheduler keeps track of shared resources and the state of each process, including their waiting times, execution states, and overall priorities.
+Description
 
-Features
+This project simulates a queue-based scheduler using a multi-level feedback queue system. The master process (oss) forks up to 18 concurrent user processes and schedules them based on a simulated system clock. It uses shared memory and message queues for interprocess communication and coordination.
 
-Shared Memory: A shared clock is used to synchronize processes.
+Only oss advances the logical clock, and it determines when to fork new processes, dispatch processes from queues, and process blocked events.
 
-Message Queues: Message queues are used for communication between oss and user processes.
+------------------------------------------------------------
 
-Process Management: The scheduler can create up to 18 processes and manage their states (blocked, running, or terminated).
+Build Instructions
 
-Priority Scheduling: Processes are scheduled based on priority calculations derived from system time and service time. (Not working)
+Ensure you’re using a Linux environment (e.g., Delmar server or Ubuntu):
 
-Logging: Key events are logged to a specified file. (Not working)
+    make
 
-File Descriptions
+This will compile two executables:
+- oss — the master process
+- user — the user process
 
-oss.c: The main scheduler program responsible for creating and managing child processes.
+------------------------------------------------------------
 
-user.c: Represents the child processes that communicate with the scheduler to perform tasks.
+Running the Program
 
-pcb.h: Header file that defines the Process Control Block (PCB) structure used to keep track of each process.
+Simply run:
 
-Makefile: Script to compile both oss and user programs.
+    ./oss
 
-Compilation
+There are no command-line arguments. Output will be saved to log.txt.
 
-To compile the project, use the provided Makefile. Simply run:
+The simulation will:
+- Stop forking after 100 total children or after 3 real-time seconds
+- End once all processes have finished
+- Print statistics and logs to log.txt
 
-make
+------------------------------------------------------------
 
-This will create two executable files: oss and user.
+Logging Format
 
-Running the Project
+Every 0.5 simulated seconds, oss logs:
+- The state of all queues (Q0, Q1, Q2, and Blocked)
+- The process table
 
-To run the scheduler (oss), use:
+Other events include:
+- Process creation
+- Dispatches
+- Full quantum usage
+- Blocking and unblocking
+- Terminations
 
-./oss [-h] [-n proc] [-s simul] [-t timeToLaunchNewChild] [-f logfile]
+Logging is capped at 10,000 lines.
 
-Command Line Options:
+------------------------------------------------------------
 
--h : Displays the help message with usage instructions.
+Statistics (printed at termination)
 
--n : Specifies the total number of processes to launch (default is 18).
+- Total CPU idle time
+- Number of times each queue was used (Q0, Q1, Q2)
+- Number of times processes were blocked
 
--s : Sets the maximum number of simultaneous processes (default is 5).
+------------------------------------------------------------
 
--t : Specifies the time interval (in nanoseconds) to launch a new child process.
+Cleanup
 
--f : Sets the log file name to record events (default is log.txt).
+Shared memory and message queues are automatically cleaned on normal or forced termination (Ctrl+C).
 
-Cleaning Up
+If needed, manually check with:
 
-To remove compiled binaries and clean the directory, run:
+    ipcs -m
+    ipcs -q
 
-make clean
+Remove manually with:
 
-This will remove the oss and user executables as well as any object files.
+    ipcrm -m <shmid>
+    ipcrm -q <msqid>
 
-Notes
+------------------------------------------------------------
 
-Shared Memory and Message Queue Cleanup: The shared memory and message queue are cleaned up when oss receives a termination signal (e.g., SIGINT). Ensure proper termination to avoid leaving shared resources in memory.
+Files Included
 
-Signal Handling: The scheduler has a timeout mechanism of 60 seconds, after which it automatically cleans up resources.
-
-Logging: Key actions, such as process launches and message exchanges, are logged to the specified log file for easier debugging and analysis.
-
-Example Usage
-
-To launch the scheduler with a maximum of 10 processes, 3 simultaneous processes, and a log file named my_log.txt:
-
-./oss -n 10 -s 3 -f my_log.txt
-
-Github:
-
-https://github.com/Lukeepoo/4760-Project-4
+- oss.c — master process logic
+- user.c — simulated user process
+- clock.h — simulated clock structure
+- pcb.h — process control block
+- queue.h / queue.c — multilevel and blocked queues
+- utility.h / utility.c — helpers for time and output
+- message.h — message queue format
+- Makefile — with suffix rules

@@ -1,286 +1,204 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/msg.h>
+#include <sys/types.h>
+#include <string.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include "pcb.h"
+#include "clock.h"
+#include "message.h"
+#include "queue.h"
+#include "utility.h"
 
-const int SHM_KEY = 1234;
-const int MSG_KEY = 5432;
-#define CLOCK_INCREMENT 1000 // Nanoseconds increment for each OSS action
+#define MAX_PROCESSES 18
+#define MAX_TOTAL_PROCESSES 100
+#define BASE_QUANTUM 10000000     // 10 ms in ns
+#define DISPATCH_OVERHEAD 1000
+#define LOGFILE "log.txt"
 
-typedef enum {
-    GOOD = 0,
-    INTERRUPT = 1,
-    TERMINATE = 2
-} State;
+SystemClock *sysClock;
+PCB *processTable;
+int shmClockID, shmPCBID, msqid;
+FILE *logFile;
 
-// Shared memory structure for clock
-typedef struct {
-    long seconds;
-    long nanoseconds;
-} SharedClock;
+int totalCreated = 0;
+int totalActive = 0;
+int blockedTotal = 0;
+unsigned int cpuIdle = 0;
+int queueUsage[3] = {0};
 
-// Message structure
-typedef struct {
-    long mtype;
-    pid_t pid;
-    State programState;
-    long seconds;
-    long nanoseconds;
-} Message;
+void cleanup(int sig) {
+    fprintf(stderr, "Cleaning up shared memory and message queues...\n");
 
-int shm_id, msg_id;
-SharedClock *shared_clock;
-PCB processTable[MAX_PROCESSES];
-int blocked_queue[MAX_PROCESSES];
-float priority_queue[MAX_PROCESSES];
-
-void cleanup(int);
-pid_t launch_process(int, int);
-void increment_clock(unsigned int, unsigned int);
-
-void message_send(pid_t worker);
-Message message_receive();
-
-void block_process(pid_t worker, long seconds, long nanoseconds);
-int is_blocked(pid_t worker);
-void calculate_priorities();
-pid_t determine_next_child();
-void terminate_all_children();
-
-int main(int argc, char *argv[]) {
-    int max_processes = 18;
-    int total_processes = 0;
-    int max_simultaneous = 5;
-    int time_to_launch = 1000000;
-    char *logfile = "log.txt";
-    int childrenToRun = 0;
-
-    int opt;
-    while ((opt = getopt(argc, argv, "hn:s:t:f:")) != -1) {
-        switch (opt) {
-            case 'h':
-                printf("Usage: %s [-h] [-n proc] [-s simul] [-t timeToLaunchNewChild] [-f logfile]\n", argv[0]);
-                exit(0);
-            case 'n':
-                max_processes = strtol(optarg, NULL, 10);
-                break;
-            case 's':
-                max_simultaneous = strtol(optarg, NULL, 10);
-                break;
-            case 't':
-                time_to_launch = strtol(optarg, NULL, 10);
-                break;
-            case 'f':
-                logfile = optarg;
-                break;
-            default:
-                fprintf(stderr, "Usage: %s [-h] [-n proc] [-s simul] [-t timeToLaunchNewChild] [-f logfile]\n", argv[0]);
-                exit(1);
-        }
-    }
-
-    // Set up shared memory for clock
-    shm_id = shmget(SHM_KEY, sizeof(SharedClock), IPC_CREAT | 0666);
-    if (shm_id < 0) {
-        perror("shmget");
-        exit(1);
-    }
-    shared_clock = (SharedClock *)shmat(shm_id, NULL, 0);
-    if (shared_clock == (void *)-1) {
-        perror("shmat");
-        exit(1);
-    }
-
-    // Remove any existing message queue with the same key
-    msg_id = msgget(MSG_KEY, 0666);
-    if (msg_id != -1) {
-        msgctl(msg_id, IPC_RMID, NULL);
-    }
-
-    // Set up message queue
-    msg_id = msgget(MSG_KEY, IPC_CREAT | 0644);
-    if (msg_id < 0) {
-        perror("msgget");
-        exit(1);
-    }
-
-    // Initialize shared clock
-    shared_clock->seconds = 0;
-    shared_clock->nanoseconds = 0;
-
-    // Set up signal handler for cleanup
-    signal(SIGINT, cleanup); // ctrl + c
-    signal(SIGALRM, cleanup); // 60 second timeout
-    alarm(60);
-
-    // Main loop for launching and scheduling processes
-    while (total_processes < max_processes || childrenToRun > 0) {
-        if (total_processes < max_simultaneous && total_processes < max_processes) {
-            launch_process(total_processes, msg_id);
-            total_processes++;
-            childrenToRun++;
-        }
-
-        pid_t nextChild = determine_next_child();
-        if (nextChild < 0) {
-            increment_clock(0, 750);
-            continue;
-        }
-
-        if (is_blocked(nextChild)) {
-            increment_clock(0, 750);
-            continue;
-        }
-
-        message_send(nextChild);
-        printf("Message Received. \n");
-        Message msg = message_receive();
-
-        if (msg.programState == GOOD) {
-            increment_clock(msg.seconds, msg.nanoseconds);
-        } else if (msg.programState == INTERRUPT) {
-            block_process(nextChild, msg.seconds, msg.nanoseconds);
-        } else if (msg.programState == TERMINATE) {
-            increment_clock(msg.seconds, msg.nanoseconds);
-            childrenToRun--;
-        }
-
-        printf("Seconds: %ld\n", shared_clock->seconds);
-        printf("Nanoseconds: %ld\n", shared_clock->nanoseconds);
-    }
-
-    terminate_all_children();
-    cleanup(0);
-    return 0;
-}
-
-pid_t launch_process(int index, int msg_id) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        // Child process
-        execl("./user", "./user", (char *)NULL);
-        perror("execl");
-        exit(1);
-    } else if (pid > 0) {
-        // Parent process
-        processTable[index].occupied = 1;
-        processTable[index].pid = pid;
-        processTable[index].startSeconds = shared_clock->seconds;
-        processTable[index].startNano = shared_clock->nanoseconds;
-        printf("OSS: Launched process with PID %d\n", pid);
-    } else {
-        perror("fork");
-    }
-
-    return pid;
-}
-
-void increment_clock(unsigned int sec, unsigned int nano) {
-    shared_clock->nanoseconds += nano;
-    if (shared_clock->nanoseconds >= 1000000000) {
-        shared_clock->seconds += 1;
-        shared_clock->nanoseconds -= 1000000000;
-    }
-    shared_clock->seconds += sec;
-}
-
-void cleanup(int signo) {
-    printf("Cleaning up...\n");
-    terminate_all_children();
-    // Detach and remove shared memory
-    shmdt(shared_clock);
-    shmctl(shm_id, IPC_RMID, NULL);
-    // Remove message queue
-    msgctl(msg_id, IPC_RMID, NULL);
-    exit(0);
-}
-
-void message_send(pid_t worker) {
-    Message msg;
-
-    msg.mtype = worker;
-    msg.pid = getpid();
-    msg.seconds = 0;
-    msg.nanoseconds = 50000000;
-    msg.programState = GOOD; // Default state for testing
-
-    if (msgsnd(msg_id, &msg, sizeof(Message), 0) == -1) {
-        perror("OSS: Error: msgsnd.\n");
-        cleanup(0);
-        exit(1);
-    }
-}
-
-Message message_receive() {
-    Message msg;
-
-    if (msgrcv(msg_id, &msg, sizeof(Message), getpid(), 0) == -1) {
-        perror("OSS: Error: msgrcv. \n");
-    }
-
-    return msg;
-}
-
-void block_process(pid_t worker_pid, long secondsToBlock, long nanosecondsToBlock) {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (processTable[i].pid == worker_pid) {
-            processTable[i].blocked = 1;
-            processTable[i].eventWaitSec = secondsToBlock;
-            processTable[i].eventWaitNano = nanosecondsToBlock;
-
-            blocked_queue[i] = 1;
-        }
-    }
-}
-
-int is_blocked(pid_t worker_pid) {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (blocked_queue[i] == 1) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-void calculate_priorities() {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (processTable[i].occupied) {
-            float totalTimeInSystem = (processTable[i].serviceTimeSeconds * 1e9) + processTable[i].serviceTimeNano;
-            float totalServiceTime = (shared_clock->seconds - processTable[i].startSeconds) * 1e9
-                                     + (shared_clock->nanoseconds - processTable[i].startNano);
-            if (totalTimeInSystem > 0) {
-                priority_queue[i] = totalServiceTime / totalTimeInSystem;
-            } else {
-                priority_queue[i] = 0; // Assign highest priority to new processes
+    // Safely kill child processes BEFORE detaching
+    if (processTable) {
+        for (int i = 0; i < MAX_PROCESSES; i++) {
+            if (processTable[i].occupied) {
+                kill(processTable[i].pid, SIGTERM);
             }
         }
     }
+
+    // Wait for any terminated children
+    while (wait(NULL) > 0);
+
+    // Detach shared memory
+    if (sysClock) shmdt(sysClock);
+    if (processTable) shmdt(processTable);
+
+    // Remove shared memory segments
+    if (shmClockID > 0) shmctl(shmClockID, IPC_RMID, NULL);
+    if (shmPCBID > 0) shmctl(shmPCBID, IPC_RMID, NULL);
+
+    // Remove message queue
+    if (msqid > 0) msgctl(msqid, IPC_RMID, NULL);
+
+    // Close log file
+    if (logFile) fclose(logFile);
+
+    exit(0);
 }
 
-pid_t determine_next_child() {
-    pid_t child = -1;
-    float highestPriority = 1.0;
 
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (processTable[i].occupied && priority_queue[i] < highestPriority) {
-            highestPriority = priority_queue[i];
-            child = processTable[i].pid;
-        }
+void forkChild(int index) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        char args[4][10];
+        sprintf(args[0], "%d", index);
+        sprintf(args[1], "%d", shmClockID);
+        sprintf(args[2], "%d", shmPCBID);
+        sprintf(args[3], "%d", msqid);
+        execl("./user", "./user", args[0], args[1], args[2], args[3], NULL);
+        perror("execl");
+        exit(1);
+    } else {
+        processTable[index].occupied = 1;
+        processTable[index].pid = pid;
+        processTable[index].startSeconds = sysClock->seconds;
+        processTable[index].startNano = sysClock->nanoseconds;
+        totalCreated++;
+        totalActive++;
+        fprintf(logFile, "OSS: Generating process with PID %d and putting it in queue 0 at time %u:%u\n",
+                pid, sysClock->seconds, sysClock->nanoseconds);
+        enqueue(&readyQueue0, index);
     }
-
-    return child;
 }
 
-void terminate_all_children() {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (processTable[i].occupied) {
-            kill(processTable[i].pid, SIGTERM);
-            waitpid(processTable[i].pid, NULL, 0);
+int main() {
+    srand(time(NULL));
+    signal(SIGINT, cleanup);
+    signal(SIGTERM, cleanup);
+
+    shmClockID = shmget(IPC_PRIVATE, sizeof(SystemClock), IPC_CREAT | 0666);
+    shmPCBID = shmget(IPC_PRIVATE, sizeof(PCB) * MAX_PROCESSES, IPC_CREAT | 0666);
+    sysClock = shmat(shmClockID, NULL, 0);
+    processTable = shmat(shmPCBID, NULL, 0);
+    memset(sysClock, 0, sizeof(SystemClock));
+    memset(processTable, 0, sizeof(PCB) * MAX_PROCESSES);
+
+    msqid = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
+    logFile = fopen(LOGFILE, "w");
+
+    initializeQueues();
+
+    unsigned int nextForkSec = 0, nextForkNS = 0;
+    unsigned int logLimit = 0;
+    time_t startTime = time(NULL);
+
+    while ((totalCreated < MAX_TOTAL_PROCESSES || totalActive > 0) &&
+           (time(NULL) - startTime < 3)) {
+
+        advanceClock(sysClock, 0, 10000);
+        checkBlocked(sysClock, processTable, &blockedQueue, logFile);
+
+        if (compareTime(sysClock, nextForkSec, nextForkNS) >= 0 &&
+            totalCreated < MAX_TOTAL_PROCESSES) {
+            for (int i = 0; i < MAX_PROCESSES; i++) {
+                if (!processTable[i].occupied) {
+                    forkChild(i);
+                    int rns = rand() % 1000000000;
+                    nextForkNS = sysClock->nanoseconds + rns;
+                    nextForkSec = sysClock->seconds + (nextForkNS / 1000000000);
+                    nextForkNS %= 1000000000;
+                    break;
+                }
+            }
         }
+
+        int index = getNextReadyProcess(&queueUsage[0]);
+        if (index == -1) {
+            advanceClock(sysClock, 0, 100000000); // idle
+            cpuIdle += 100000000;
+            continue;
+        }
+
+        int level = getQueueLevel(index);
+        int quantum = BASE_QUANTUM * (1 << level);
+
+        MessageBuffer msg;
+        msg.mtype = processTable[index].pid;
+        sprintf(msg.mtext, "%d", quantum);
+        msgsnd(msqid, &msg, sizeof(msg.mtext), 0);
+
+        advanceClock(sysClock, 0, DISPATCH_OVERHEAD);
+        fprintf(logFile, "OSS: Dispatching process with PID %d from queue %d at time %u:%u\n",
+                processTable[index].pid, level, sysClock->seconds, sysClock->nanoseconds);
+
+        msgrcv(msqid, &msg, sizeof(msg.mtext), 1, 0);
+        int result = atoi(msg.mtext);
+        int used = abs(result);
+        advanceClock(sysClock, 0, used);
+
+        processTable[index].serviceTimeNano += used;
+        processTable[index].serviceTimeSeconds += processTable[index].serviceTimeNano / 1000000000;
+        processTable[index].serviceTimeNano %= 1000000000;
+
+        if (result < 0) {
+            fprintf(logFile, "OSS: Receiving that process with PID %d terminated after using %d ns\n",
+                    processTable[index].pid, used);
+            processTable[index].occupied = 0;
+            totalActive--;
+        } else if (result < quantum) {
+            processTable[index].blocked = 1;
+            blockedTotal++;
+            int wait = rand() % 500000000;
+            processTable[index].eventWaitNano = sysClock->nanoseconds + wait;
+            processTable[index].eventWaitSec = sysClock->seconds + processTable[index].eventWaitNano / 1000000000;
+            processTable[index].eventWaitNano %= 1000000000;
+            enqueue(&blockedQueue, index);
+            fprintf(logFile, "OSS: Receiving that process with PID %d ran for %d ns, not using full quantum\n",
+                    processTable[index].pid, used);
+            fprintf(logFile, "OSS: Putting process with PID %d into blocked queue\n", processTable[index].pid);
+        } else {
+            int newLevel = (level < 2) ? level + 1 : 2;
+            enqueue((newLevel == 1) ? &readyQueue1 : &readyQueue2, index);
+            fprintf(logFile, "OSS: Receiving that process with PID %d ran full quantum of %d ns\n",
+                    processTable[index].pid, used);
+            fprintf(logFile, "OSS: Putting process with PID %d into queue %d\n", processTable[index].pid, newLevel);
+        }
+
+        logLimit++;
+        if (logLimit % 50 == 0) {
+            fprintf(logFile, "OSS: Outputting queues:\n");
+            printQueues(logFile);
+            fprintf(logFile, "OSS: Outputting process table:\n");
+            printProcessTable(logFile, processTable);
+        }
+
+        if (logLimit >= 10000) break;
     }
+
+    fprintf(logFile, "\n=== Statistics ===\n");
+    fprintf(logFile, "CPU Idle Time: %u ns\n", cpuIdle);
+    fprintf(logFile, "Q0 used: %d times\nQ1 used: %d times\nQ2 used: %d times\n",
+            queueUsage[0], queueUsage[1], queueUsage[2]);
+    fprintf(logFile, "Processes blocked: %d times\n", blockedTotal);
+
+    cleanup(0);
+    return 0;
 }
